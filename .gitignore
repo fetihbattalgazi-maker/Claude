@@ -1,0 +1,3 @@
+shorts/*/out/
+*.wav
+__pycache__/
