@@ -1,7 +1,7 @@
 """LogicCoreLab shorts engine: 4K vertical (2160x3840) frame renderer with brand look,
 animated Turkish subtitles and parallel chunked encoding. Design coordinates are 1080x1920."""
 import math, os, subprocess, sys
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageChops
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 S = 2; W, H = 1080 * S, 1920 * S; FPS = 30
@@ -93,7 +93,7 @@ def person(d, cx, cy, size, color, alpha=1.0, outline=None):
     d.pieslice([P(cx - size * 0.38), P(cy - 0.02 * size), P(cx + size * 0.38), P(cy + size * 0.74)], 180, 360, fill=color + (A,))
     if outline:
         d.ellipse([P(cx - size * 0.62), P(cy - size * 0.62), P(cx + size * 0.62), P(cy + size * 0.5)], outline=outline + (A,), width=P(5))
-def outro(fr, d, t, t_logic, t_brand):
+def outro(fr, d, t, t_logic, t_brand, tagline='LOGIC > INTUITION'):
     p = prog(t, 0.3, 0.5)
     if p > 0:
         for j in range(12):
@@ -101,7 +101,7 @@ def outro(fr, d, t, t_logic, t_brand):
             d.line([(P(540 + r1 * math.cos(a)), P(700 + r1 * math.sin(a))), (P(540 + r2 * math.cos(a)), P(700 + r2 * math.sin(a)))],
                    fill=YEL + (int(170 * p),), width=P(10))
     icon(fr, 'bulb', 540, 700, 330 * back(prog(t, 0.05, 0.5)))
-    s = back(prog(t, t_logic, 0.45)); txt(d, 'LOGIC > INTUITION', 540, 1010, 76 * s, WHITE, stroke=5, shadow=True)
+    s = back(prog(t, t_logic, 0.45)); txt(d, tagline, 540, 1010, 76 * s, WHITE, stroke=5, shadow=True)
     s = back(prog(t, t_brand, 0.45)); txt(d, 'LogicCoreLab', 540, 1125, 104 * s, CYAN, stroke=5, shadow=True)
     s = back(prog(t, t_brand + 0.3, 0.45)) * (1 + 0.04 * math.sin(t * 6)); pill(d, 'FOLLOW FOR MORE', 540, 1262, 46, YEL, DARK, s)
 
@@ -142,3 +142,104 @@ def encode_chunk(frame_fn, a, b, path):
                           '-g', '60', path], stdin=subprocess.PIPE)
     for n in range(a, b): p.stdin.write(frame_fn(n / FPS).tobytes())
     p.stdin.close(); p.wait()
+
+# ---------- planets (drawn, not images) ----------
+_pl = {}
+def planet(fr, cx, cy, r, base, bands, rot=0.0, alpha=1.0, glow=None, glow_a=0.0):
+    R = int(r * S)
+    if R < 3 or alpha <= 0: return
+    size = 2 * R
+    if glow and glow_a > 0:
+        d = ImageDraw.Draw(fr, 'RGBA')
+        for k in range(8, 0, -1):
+            e = k * 9; a = int(glow_a * alpha * (46 - k * 5))
+            if a > 0: d.ellipse([P(cx - r - e), P(cy - r - e), P(cx + r + e), P(cy + r + e)], fill=glow + (a,))
+    layer = Image.new('RGBA', (size, size), base + (255,)); ld = ImageDraw.Draw(layer, 'RGBA')
+    nb = len(bands); hgt = size * 0.075
+    for k, col in enumerate(bands):
+        y = size * (0.08 + 0.84 * k / max(1, nb - 1)); stp = max(2, size // 48)
+        top = [(xx, y + math.sin(xx / size * 6.283 * 1.3 + rot + k * 1.7) * hgt * 0.7) for xx in range(0, size + stp, stp)]
+        ld.polygon(top + [(xx, yy + hgt) for xx, yy in reversed(top)], fill=col + (150,))
+    if R not in _pl:
+        sh = Image.new('L', (size, size), 0); ImageDraw.Draw(sh).ellipse([int(size * 0.3), int(size * 0.22), int(size * 1.4), int(size * 1.32)], fill=185)
+        sh = sh.filter(ImageFilter.GaussianBlur(size * 0.07))
+        hl = Image.new('L', (size, size), 0); ImageDraw.Draw(hl).ellipse([int(size * 0.14), int(size * 0.1), int(size * 0.5), int(size * 0.42)], fill=80)
+        hl = hl.filter(ImageFilter.GaussianBlur(size * 0.09))
+        circ = Image.new('L', (size, size), 0); ImageDraw.Draw(circ).ellipse([0, 0, size - 1, size - 1], fill=255)
+        _pl[R] = (sh, hl, circ)
+    sh, hl, circ = _pl[R]
+    layer = Image.composite(Image.new('RGBA', (size, size), (6, 6, 24, 255)), layer, sh)
+    layer = Image.composite(Image.new('RGBA', (size, size), (255, 255, 255, 255)), layer, hl)
+    layer.putalpha(circ if alpha >= 1 else circ.point(lambda v: int(v * alpha)))
+    fr.paste(layer, (P(cx) - R, P(cy) - R), layer)
+
+# ---------- timeline + CLI shared by every short ----------
+def make_timeline(EN, scenes, audio_dir, lead=0.3, gap=0.3, tail=0.45, gaps=None, end_pad=1.4):
+    gaps = gaps or {}
+    def adur(i):
+        return float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0',
+                                              os.path.join(audio_dir, f'e{i:02d}.mp3')]))
+    D = {i: adur(i) for i in EN}; T = {}; st = []; t = 0.0
+    for k, sents in enumerate(scenes):
+        st.append(t); tt = t + lead
+        for j, i in enumerate(sents):
+            if j: tt += gaps.get(i, gap)
+            T[i] = tt; tt += D[i]
+        t = tt + tail + (end_pad if k == len(scenes) - 1 else 0)
+    def ev(i, word, occ=0):
+        s_ = EN[i].lower(); pos = -1
+        for _ in range(occ + 1): pos = s_.find(word.lower(), pos + 1)
+        return T[i] + D[i] * clamp(pos / len(s_)) * 0.97 + 0.05
+    return T, D, st, t, ev
+def subs_from(EN, TR, T, D):
+    items = []
+    for i in EN:
+        end = T[i] + D[i] + 0.3; parts = TR[i].split('|')
+        tot = sum(len(p) for p in parts); a = T[i]
+        for p_ in parts:
+            b = a + (end - T[i]) * len(p_) / tot; items.append((a, b, p_)); a = b
+    return build_subs(items)
+def make_frame(scene_fns, starts, fade_in, subs, no_wm=(), trf=0.35):
+    def scene_abs(k, t):
+        fr = bg(); d = ImageDraw.Draw(fr, 'RGBA'); r = scene_fns[k](fr, d, t)
+        fr = r if isinstance(r, Image.Image) else fr
+        if k not in no_wm: watermark(ImageDraw.Draw(fr, 'RGBA'))
+        return fr
+    def frame(t):
+        k = max(i for i in range(len(starts)) if starts[i] <= t + 1e-9)
+        fr = scene_abs(k, t); lt = t - starts[k]
+        if k in fade_in and lt < trf: fr = Image.blend(scene_abs(k - 1, starts[k] - 0.001), fr, eio(lt / trf))
+        draw_sub(ImageDraw.Draw(fr, 'RGBA'), subs, t)
+        return fr
+    return frame
+def cli(frame, total, here, workers=2):
+    from multiprocessing import Process
+    out = os.path.join(here, 'out'); os.makedirs(out, exist_ok=True); mode = sys.argv[1]
+    if mode == 'preview':
+        for ts in sys.argv[2:]: frame(float(ts)).resize((540, 960), Image.LANCZOS).save(os.path.join(out, f'prev_{ts}.jpg'), quality=88)
+    elif mode == 'render':
+        F = int(total * FPS); step = (F + workers - 1) // workers; ps = []
+        for i in range(workers):
+            p = Process(target=encode_chunk, args=(frame, i * step, min(F, (i + 1) * step), os.path.join(out, f'chunk_{i}.mp4'))); p.start(); ps.append(p)
+        for p in ps: p.join()
+        with open(os.path.join(out, 'list.txt'), 'w') as f:
+            for i in range(workers): f.write(f"file 'chunk_{i}.mp4'\n")
+        subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'concat', '-i', os.path.join(out, 'list.txt'), '-c', 'copy',
+                        os.path.join(out, 'video_4k.mp4')], check=True)
+        print('RENDER_OK', F, 'frames')
+def mix(here, T, total, final_name, music_vol=0.5, fx_vol=0.55):
+    O = os.path.join(here, 'out'); A = os.path.join(here, 'audio'); ids = sorted(T); inp, fc = [], []
+    for i in ids: inp += ['-i', os.path.join(A, f'e{i:02d}.mp3')]
+    inp += ['-i', os.path.join(O, 'music.wav'), '-i', os.path.join(O, 'fx.wav')]; n = len(ids)
+    for k, i in enumerate(ids):
+        ms = int(T[i] * 1000); fc.append(f"[{k}:a]aresample=44100,aformat=channel_layouts=stereo,adelay={ms}|{ms}[n{k}]")
+    fc.append(''.join(f'[n{k}]' for k in range(n)) + f"amix=inputs={n}:normalize=0,apad,atrim=0:{total:.2f},asplit=2[vo][sc]")
+    fc.append(f"[{n}:a]volume={music_vol},apad,atrim=0:{total:.2f}[m]")
+    fc.append("[m][sc]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[md]")
+    fc.append(f"[{n + 1}:a]volume={fx_vol},apad,atrim=0:{total:.2f}[fx]")
+    fc.append(f"[vo][md][fx]amix=inputs=3:normalize=0,atrim=0:{total:.2f},loudnorm=I=-14:TP=-1.5:LRA=11[a]")
+    subprocess.run(['ffmpeg', '-y', '-v', 'error', *inp, '-filter_complex', ';'.join(fc), '-map', '[a]', '-c:a', 'aac', '-b:a', '192k',
+                    '-ar', '48000', os.path.join(O, 'audio.m4a')], check=True)
+    subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', os.path.join(O, 'video_4k.mp4'), '-i', os.path.join(O, 'audio.m4a'),
+                    '-map', '0:v', '-map', '1:a', '-c', 'copy', '-shortest', '-movflags', '+faststart', os.path.join(O, final_name)], check=True)
+    print('FINAL OK', final_name)
